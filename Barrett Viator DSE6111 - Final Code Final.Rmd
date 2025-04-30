@@ -1,0 +1,815 @@
+---
+title: "Barrett Viator DSE6111 - Final Report"
+author: "Barrett Viator"
+date: "2024-12-07"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Preparations, Data Cleaning, and Splitting
+
+```{r, include = FALSE}
+library(tidymodels)
+library(parsnip)
+library(kknn)
+library(class)
+library(yardstick)
+library(dplyr)
+library(ggplot2)
+library(pROC)
+library(ROCR)
+library(ROSE)
+library(vip)
+library(caret)
+library(e1071)
+library(naivebayes)
+library(MASS)
+library(discrim)
+library(pROC)
+library(kknn)
+library(ranger)
+
+```
+
+```{r, include= FALSE}
+setwd("C:\\Program Files\\Merrimack\\DSE6111\\Project")
+customer_data <- read.csv("C:\\Program Files\\Merrimack\\DSE6111\\Project\\customer_data.csv")
+customer_data_na_removed <- na.omit(customer_data)
+customer_data_clientnum_removed <- subset(customer_data_na_removed, select = -CLIENTNUM)
+
+customer_data_split <- initial_split(customer_data_clientnum_removed, prop = 0.75)
+
+training_set <- training(customer_data_split)
+test_set  <- testing(customer_data_split)
+training_set2 <- training(customer_data_split)
+test_set2  <- testing(customer_data_split)
+```
+
+```{r}
+train_index <- createDataPartition(training_set$Attrition_Flag, p = 0.75, list = FALSE)
+
+train_data <- training_set[train_index, ]
+test_data <- training_set[-train_index, ]
+train_data2 <- training_set[train_index, ]
+test_data2 <- training_set[-train_index, ]
+train_data3 <- training_set[train_index, ]
+test_data3 <- training_set[-train_index, ]
+train_data4 <- training_set[train_index, ]
+test_data4 <- training_set[-train_index, ]
+train_data5<- training_set[train_index, ]
+test_data5 <- training_set[-train_index, ]
+```
+
+```{r}
+train_data$Attrition_Flag <- as.factor(train_data$Attrition_Flag)
+
+# Balance the data using oversampling (default method of ovun.sample)
+balanced_data <- ovun.sample(Attrition_Flag ~ ., data = train_data, method = "over", N = 5697)$data
+
+```
+### Null Model
+
+```{r}
+null_model <- balanced_data %>%
+  count(Attrition_Flag) %>%
+  top_n(1, n) %>% 
+  pull(Attrition_Flag)
+
+null_predictions <- tibble(Attrition_Flag = rep(null_model, nrow(test_data)))
+
+
+null_model_accuracy <- mean(null_predictions$Attrition_Flag == test_data$Attrition_Flag)
+cat("Test Accuracy for the Null Model: ", null_model_accuracy, "\n")
+
+```
+
+
+### CV Sets and Recipes
+
+```{r}
+cv_set <- vfold_cv(train_data2, strata = "Attrition_Flag", v = 10)
+
+customer_attrition_recipe <- recipe(Attrition_Flag ~ .,data = train_data2) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+```
+
+```{r}
+cv_set3 <- vfold_cv(training_set2, strata = "Attrition_Flag", v = 10)
+train_data2$Attrition_Flag <- as.factor(train_data2$Attrition_Flag)
+test_data2$Attrition_Flag <- as.factor(test_data2$Attrition_Flag)
+customer_attrition_recipe3 <- recipe(Attrition_Flag ~ ., data = training_set2) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+
+```
+
+
+### Logistic Regression 
+
+```{r}
+train_data$Attrition_Flag <- as.character(train_data$Attrition_Flag)
+prepared_recipe <- prep(customer_attrition_recipe, training = train_data2)
+
+processed_train_data <- bake(prepared_recipe, new_data = train_data2) 
+
+customer_log_reg_mod <- 
+  logistic_reg(penalty = tune(), mixture = 1) %>% 
+  set_engine("glmnet")
+
+customer_log_reg_workflow <- 
+  workflow() %>% 
+  add_recipe(customer_attrition_recipe) %>%
+  add_model(customer_log_reg_mod)
+
+customer_log_reg_grid <- tibble(penalty = 10^seq(-4, -1, length.out = 30))
+
+log_reg_tuning_results <- tune_grid(
+  object = customer_log_reg_workflow,
+  resamples = cv_set,
+  grid = customer_log_reg_grid,
+  metrics = metric_set(roc_auc)
+)
+
+```
+
+```{r} 
+
+top_log_models <- log_reg_tuning_results %>% 
+  show_best(metric = "roc_auc", n = 15) %>% 
+  arrange(penalty)
+
+top_log_models
+
+
+```
+```{r}
+log_result_metrics <- collect_metrics(log_reg_tuning_results)
+
+log_roc_auc_results <- log_result_metrics %>% 
+  filter(.metric == "roc_auc")
+
+print(log_roc_auc_results)
+
+best_log_auc_model <- log_roc_auc_results %>% 
+  arrange(desc(mean))
+
+head(best_log_auc_model)
+
+```
+
+```{r}
+train_data2$Attrition_Flag <- as.factor(train_data2$Attrition_Flag)
+
+log_reg_spec <- logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")
+
+
+log_reg_fit <- log_reg_spec %>%
+  fit(Attrition_Flag ~ ., data = train_data2)
+
+log_reg_pred_prob <- predict(log_reg_fit, test_data, type = "raw")
+log_reg_pred_class <- ifelse(log_reg_pred_prob > 0.5, 1, 0)
+
+log_reg_conf_matrix <- table(Predicted = log_reg_pred_class, Actual = test_data$Attrition_Flag)
+
+print(log_reg_conf_matrix)
+
+log_reg_accuracy <- sum(diag(log_reg_conf_matrix)) / sum(log_reg_conf_matrix)
+print(paste("Accuracy: ", round(log_reg_accuracy, 3)))
+
+```
+
+```{r}
+
+log_roc_curve <- roc(test_data$Attrition_Flag, log_reg_pred_prob)
+
+log_auc <- auc(log_roc_curve)
+
+print(paste("AUC:", log_auc))
+
+```
+
+```{r}
+log_reg_roc_plot <- 
+  log_reg_tuning_results %>% 
+  collect_metrics() %>% 
+  filter(.metric == "roc_auc") %>%  
+  ggplot(aes(x = penalty, y = mean, color = penalty)) +  #
+  geom_point() + 
+  geom_line() +   
+  ylab("ROC AUC") +  
+  scale_x_log10(labels = label_number()) +  
+  scale_color_continuous(type = "viridis", name = "Penalty") +  
+  ggtitle("Attrition ROC AUC vs Penalty for Logistic Regression") + 
+  theme_minimal() +  
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+log_reg_roc_plot  
+
+```
+
+```{r}
+train_data2$Attrition_Flag <- as.factor(train_data2$Attrition_Flag)
+log_best_model <- log_reg_tuning_results %>% 
+  select_best(metric = "roc_auc")
+
+log_final_model <- customer_log_reg_workflow %>%
+  finalize_workflow(log_best_model) %>% 
+  fit(data = train_data2) 
+
+
+log_final_fit <- log_final_model %>%
+  extract_fit_parsnip()
+
+
+coefficients <- tidy(log_final_fit)
+
+
+ggplot(coefficients, aes(x = reorder(term, estimate), y = estimate)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Feature Importance (Logistic Regression)",
+       x = "Feature",
+       y = "Coefficient Estimate") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8)) 
+
+
+```
+
+### KNN
+
+```{r}
+train_data$Attrition_Flag <- as.factor(train_data$Attrition_Flag)
+
+customer_attrition_recipe4 <- recipe(Attrition_Flag ~ 
+                                      Customer_Age + 
+                                      Gender + 
+                                      Dependent_count + 
+                                      Education_Level + 
+                                      Marital_Status + 
+                                      Income_Category + 
+                                      Card_Category + 
+                                      Months_on_book + 
+                                      Total_Relationship_Count + 
+                                      Months_Inactive_12_mon + 
+                                      Contacts_Count_12_mon + 
+                                      Credit_Limit + 
+                                      Total_Revolving_Bal + 
+                                      Avg_Open_To_Buy + 
+                                      Total_Amt_Chng_Q4_Q1 + 
+                                      Total_Trans_Amt + 
+                                      Total_Trans_Ct + 
+                                      Total_Ct_Chng_Q4_Q1 + 
+                                      Avg_Utilization_Ratio, 
+                                    data = train_data3)
+
+customer_attrition_recipe4 <- customer_attrition_recipe4 %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes()) %>%  
+  step_center(all_numeric(), -all_outcomes())%>%
+  step_impute_median(all_numeric(), -all_outcomes())
+
+```
+
+
+```{r}
+train_data$Attrition_Flag <- as.factor(train_data$Attrition_Flag)
+prepared_recipe4 <- prep(customer_attrition_recipe4, training = train_data3)
+
+processed_train_data4 <- bake(prepared_recipe4, new_data = train_data)
+
+```
+
+```{r}
+cv_set4 <- vfold_cv(train_data3, v = 10, strata = Attrition_Flag)
+
+knn_model <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>% 
+  set_mode("classification")
+
+knn_workflow <- workflow() %>%
+  add_recipe(customer_attrition_recipe4) %>%
+  add_model(knn_model)
+
+knn_grid <- tibble(neighbors = seq(3, 15, by = 2))
+
+knn_res <- knn_workflow %>%
+  tune_grid(
+    resamples = cv_set4,
+    grid = knn_grid,
+    control = control_grid(save_pred = TRUE),
+    metrics = metric_set(roc_auc))
+
+```
+
+```{r}
+best_knn <- knn_res %>%
+  select_best(metric = "roc_auc")
+
+final_knn_workflow <- knn_workflow %>%
+  finalize_workflow(best_knn)
+
+final_knn_fit <- final_knn_workflow %>%
+  fit(data = train_data3)
+```
+
+```{r}
+training_set$Attrition_Flag <- as.character(training_set$Attrition_Flag)
+prepared_recipe3 <- prep(customer_attrition_recipe4, training = train_data3)
+processed_train_data3 <- bake(prepared_recipe3, new_data = train_data3)
+
+test_baked <- bake(prepared_recipe3, new_data = test_data2)
+
+knn_test_pred <- predict(final_knn_fit, new_data = test_data2, type = "prob")
+
+test_results_knn <- test_data2 %>%
+  dplyr::select(Attrition_Flag) %>%
+  bind_cols(knn_test_pred)
+
+test_results_knn <- test_results_knn %>%
+  rename(pred_Attrited_Customer = `.pred_Attrited Customer`)
+
+test_results_knn$pred_class <- ifelse(test_results_knn$pred_Attrited_Customer > 0.5, 
+                                      "Attrited Customer", 
+                                      "Existing Customer")
+```
+
+```{r}
+
+test_results_knn$pred_class <- factor(test_results_knn$pred_class, levels = c("Existing Customer", "Attrited Customer"))
+test_results_knn$Attrition_Flag <- factor(test_results_knn$Attrition_Flag, levels = c("Existing Customer", "Attrited Customer"))
+test_results_knn$pred_class <- factor(test_results_knn$pred_class, levels = c("Existing Customer", "Attrited Customer"))
+
+accuracy_knn <- accuracy_vec(truth = test_results_knn$Attrition_Flag, estimate = test_results_knn$pred_class)
+
+
+```
+
+```{r}
+roc_auc_knn <- roc_auc_vec(truth = test_results_knn$Attrition_Flag, 
+  estimate = test_results_knn$pred_Attrited_Customer, event_level = "second")
+
+print(paste("ROC AUC:", roc_auc_knn))
+
+print(paste("Accuracy:", accuracy_knn))
+
+```
+
+```{r}
+roc_curve_knn <- roc_curve(
+  test_results_knn, 
+  truth = Attrition_Flag, 
+  pred_Attrited_Customer,
+  event_level = "second" 
+)
+roc_auc_knn <- roc_auc(test_results_knn, truth = Attrition_Flag, pred_Attrited_Customer)
+
+autoplot(roc_curve_knn) + 
+  ggtitle(paste("ROC Curve for KNN Model", sep = "")) + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+
+### Naive Bayes
+
+```{r}
+nb_model <- naiveBayes(Attrition_Flag ~ ., data = train_data)
+nb_pred <- predict(nb_model, test_data)
+
+nb_conf_matrix <- table(Predicted = nb_pred, Actual = test_data$Attrition_Flag)
+
+print(nb_conf_matrix)
+
+nb_accuracy <- sum(diag(nb_conf_matrix)) / sum(nb_conf_matrix)
+print(paste("Accuracy:", nb_accuracy))
+
+```
+
+
+```{r}
+nb_prob <- predict(nb_model, test_data, type = "raw")
+nb_roc_curve <- roc(test_data$Attrition_Flag, nb_prob[, 2])
+nb_auc_value <- auc(nb_roc_curve)
+
+print(paste("AUC:", nb_auc_value))
+
+```
+
+```{r}
+ggroc(nb_roc_curve) + 
+  ggtitle(paste("Naive Bayes ROC Curve (AUC = ", round(nb_auc_value, 3), ")", sep = "")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+```
+
+### Random Forest
+
+```{r}
+
+cv_set4 <- vfold_cv(balanced_data, v = 10, strata = Attrition_Flag)
+
+
+customer_attrition_recipe5 <- recipe(Attrition_Flag ~ 
+                                      Customer_Age + 
+                                      Gender + 
+                                      Dependent_count + 
+                                      Education_Level + 
+                                      Marital_Status + 
+                                      Income_Category + 
+                                      Card_Category + 
+                                      Months_on_book + 
+                                      Total_Relationship_Count + 
+                                      Months_Inactive_12_mon + 
+                                      Contacts_Count_12_mon + 
+                                      Credit_Limit + 
+                                      Total_Revolving_Bal + 
+                                      Avg_Open_To_Buy + 
+                                      Total_Amt_Chng_Q4_Q1 + 
+                                      Total_Trans_Amt + 
+                                      Total_Trans_Ct + 
+                                      Total_Ct_Chng_Q4_Q1 + 
+                                      Avg_Utilization_Ratio, 
+                                    data = balanced_data)
+
+
+customer_attrition_recipe5 <- customer_attrition_recipe5 %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes()) %>%  
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_impute_median(all_numeric(), -all_outcomes())  
+
+```
+
+```{r}
+
+cv_set5 <- vfold_cv(balanced_data, v = 10,  strata = Attrition_Flag)
+
+
+customer_attrition_recipe6 <- recipe(Attrition_Flag ~ 
+                                      Customer_Age + 
+                                      Gender + 
+                                      Dependent_count + 
+                                      Education_Level + 
+                                      Marital_Status + 
+                                      Income_Category + 
+                                      Card_Category + 
+                                      Months_on_book + 
+                                      Total_Relationship_Count + 
+                                      Months_Inactive_12_mon + 
+                                      Contacts_Count_12_mon + 
+                                      Credit_Limit + 
+                                      Total_Revolving_Bal + 
+                                      Avg_Open_To_Buy + 
+                                      Total_Amt_Chng_Q4_Q1 + 
+                                      Total_Trans_Amt + 
+                                      Total_Trans_Ct + 
+                                      Total_Ct_Chng_Q4_Q1 + 
+                                      Avg_Utilization_Ratio, 
+                                    data = balanced_data)
+
+
+customer_attrition_recipe6 <- customer_attrition_recipe6 %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes()) %>%  
+  step_center(all_numeric(), -all_outcomes())%>%
+  step_impute_median(all_numeric(), -all_outcomes())  
+
+```
+
+```{r}
+rf_model <- rand_forest(
+  mtry = tune(),  
+  trees = 500,    
+  min_n = tune()  
+) %>%
+  set_engine("ranger") %>%  
+  set_mode("classification")
+
+
+rf_workflow <- workflow() %>%
+  add_recipe(customer_attrition_recipe6) %>%
+  add_model(rf_model)
+
+rf_grid <- grid_regular(
+  mtry(range = c(1, 5)),
+  min_n(range = c(1, 10)),
+  levels = 5
+)
+
+rf_tune_res <- rf_workflow %>%
+  tune_grid(
+    resamples = cv_set4,
+    grid = rf_grid,
+    control = control_grid(save_pred = TRUE),
+    metrics = metric_set(roc_auc)) 
+```
+
+```{r}
+
+best_rf <- rf_tune_res %>%
+  select_best(metric = "roc_auc")
+
+```
+```{r}
+show_notes(.Last.tune.result)
+
+```
+
+```{r}
+train_data5$Attrition_Flag <- as.character(train_data5$Attrition_Flag)
+
+final_rf_workflow <- rf_workflow %>% finalize_workflow(best_rf)
+
+final_rf_fit <- final_rf_workflow %>%
+  fit(data = train_data5)
+
+```
+
+```{r}
+train_data5$Attrition_Flag <- as.character(train_data5$Attrition_Flag)
+prepared_recipe7 <- prep(customer_attrition_recipe4, training = train_data5)
+processed_train_data7 <- bake(prepared_recipe7, new_data = train_data5)
+
+test_baked7 <- bake(prepared_recipe7, new_data = test_data2)
+
+```
+
+```{r}
+rf_test_pred <- predict(final_rf_fit, new_data = test_data2, type = "prob")
+
+test_results_rf <- test_data2 %>%
+  dplyr::select(Attrition_Flag) %>%
+  bind_cols(rf_test_pred)
+
+
+
+test_results_rf$Attrition_Flag <- factor(test_results_rf$Attrition_Flag, 
+                                          levels = c("Existing Customer", "Attrited Customer"))
+test_results_rf<- test_results_rf %>%
+  rename(pred_Attrited_Customer = `.pred_Attrited Customer`)
+
+test_results_rf$pred_class <- ifelse(test_results_rf$pred_Attrited_Customer > 0.5, 
+                                      "Attrited Customer", 
+                                      "Existing Customer")
+
+```
+
+
+```{r}
+test_results_rf$pred_class <- factor(test_results_rf$pred_class, 
+                                     levels = c("Existing Customer", "Attrited Customer"))
+test_results_rf$Attrition_Flag <- factor(test_results_rf$Attrition_Flag, 
+                                           levels = c("Existing Customer", "Attrited Customer"))
+
+test_results_rf$pred_class <- factor(test_results_rf$pred_class, 
+                                      levels = c("Existing Customer", "Attrited Customer"))
+
+accuracy_rf <- accuracy_vec(truth = test_results_rf$Attrition_Flag, 
+  estimate = test_results_rf$pred_class)
+
+
+```
+
+
+```{r}
+roc_auc_rf <- roc_auc_vec(
+  truth = test_results_rf$Attrition_Flag, 
+  estimate = test_results_rf$pred_Attrited_Customer,
+  event_level = "second"  # 
+)
+
+
+print(paste("ROC AUC:", roc_auc_rf))
+print(paste("Accuracy:", accuracy_rf))
+
+```
+
+```{r}
+roc_curve_rf <- roc_curve(
+  test_results_rf, 
+  truth = Attrition_Flag, 
+  pred_Attrited_Customer,
+  event_level = "second"
+)
+autoplot(roc_curve_rf) + 
+  ggtitle(paste("Random Forest Model ROC Curve (AUC = ", round(roc_auc_rf, 3), ")", sep = "")) + 
+  theme_minimal() +  
+  theme(plot.title = element_text(hjust = 0.5))  
+```
+### XGBoost
+
+```{r}
+balanced_data$Attrition_Flag <- as.character(balanced_data$Attrition_Flag)
+cv_set4 <- vfold_cv(training_set, v = 10)
+customer_attrition_recipe2 <- 
+  recipe(
+    Attrition_Flag ~ Customer_Age  + Gender + Dependent_count + Education_Level + Marital_Status +
+                     Income_Category + Card_Category + Months_on_book + Total_Relationship_Count +
+                     Months_Inactive_12_mon + Contacts_Count_12_mon + Credit_Limit + Total_Revolving_Bal +
+                     Avg_Open_To_Buy + Total_Amt_Chng_Q4_Q1 + Total_Trans_Amt +  Total_Trans_Ct +
+                     Total_Ct_Chng_Q4_Q1 + Avg_Utilization_Ratio,
+    data = balanced_data) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors()) 
+
+xgboost_model <- boost_tree(
+    trees = tune(),
+    tree_depth = tune(),
+    learn_rate = tune()
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+xgboost_workflow <- workflow() %>% 
+  add_recipe(customer_attrition_recipe2) %>%
+  add_model(xgboost_model)
+
+xgboost_grid <- grid_latin_hypercube(
+  trees(),
+  tree_depth(),
+  learn_rate(),
+  size = 10
+)
+
+xgboost_results <- xgboost_workflow %>%
+  tune_grid(
+    resamples = cv_set4,
+    grid = xgboost_grid,
+    control = control_grid(save_pred = TRUE),
+    metrics = metric_set(roc_auc)
+  )
+```
+
+```{r}
+xgboost_results %>%
+  collect_metrics() %>%
+  head()
+
+```
+
+```{r}
+
+best_auc3 <- xgboost_results %>% select_best(metric = "roc_auc")
+
+
+final_xgboost_workflow <- finalize_workflow(
+  xgboost_workflow,
+  best_auc3
+)
+
+final_xgboost_fit <- fit(final_xgboost_workflow, data = balanced_data)
+
+```
+
+```{R}
+
+test_predictions <- predict(final_xgboost_fit, new_data = test_set, type = "prob")
+
+test_predictions <- test_predictions %>%
+  rename(pred_attrited_customer = `.pred_Attrited Customer`)
+
+test_predictions <- test_predictions %>%
+  rename(pred_existing_customer = `.pred_Existing Customer`)
+
+```
+
+```{r}
+
+roc_data <- test_set2 %>%
+  bind_cols(test_predictions)
+
+```
+
+
+```{r}
+roc_data$Attrition_Flag <- as.factor(roc_data$Attrition_Flag)
+roc_auc_results <- roc_auc(
+  data = roc_data,  
+  truth = Attrition_Flag,  
+  pred_Attrited_Customer  
+)
+
+print(roc_auc_results)
+
+```
+
+```{r}
+roc_curve_rf <- roc_curve(
+  roc_data,  
+  truth = Attrition_Flag,  
+  pred_Attrited_Customer,  
+  event_level = "second"  
+)
+
+```
+
+
+```{r}
+
+roc_curve_data <- roc_curve(roc_data, truth = Attrition_Flag, pred_Attrited_Customer)
+
+
+ggplot(roc_curve_data, aes(x = 1 - specificity, y = sensitivity, color = .threshold)) +
+  ggtitle(paste("ROC Curve for XGBoost Model (AUC = ", round(roc_auc_results$.estimate, 3), ")", sep = "")) +
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") + 
+  labs(x = "False Positive Rate (1 - Specificity)", y = "True Positive Rate (Sensitivity)") +
+  theme_minimal()
+```
+
+
+```{r}
+
+last_xgboost_fit <- 
+  final_xgboost_workflow %>% 
+  last_fit(customer_data_split)
+
+last_xgboost_fit %>% 
+  extract_fit_parsnip() %>% 
+  vip(num_features = 20)
+
+```
+
+```{r}
+final_xgboost_workflow <- last_xgboost_fit %>%
+  extract_workflow()
+
+xg_test_set <- last_xgboost_fit$.predictions[[1]] 
+predictions <- predict(final_xgboost_workflow, new_data = test_set, type = "prob")
+
+
+roc_data <- xg_test_set %>%
+  bind_cols(predictions)
+
+```
+
+```{r}
+
+roc_auc_results <- roc_auc(
+  data = roc_data,
+  truth = Attrition_Flag, 
+  pred_Attrited_Customer  
+)
+
+print(paste("AUC: ", round(roc_auc_results$.estimate, 3)))
+
+
+roc_curve_results <- roc_curve(
+  data = roc_data,
+  truth = Attrition_Flag,  
+  pred_Attrited_Customer  
+)
+
+
+```
+
+
+```{r}
+test_data$Attrition_Flag <- as.factor(test_data$Attrition_Flag)
+
+xgboost_predictions <- predict(final_xgboost_fit, test_data, type = "class")
+
+xg_confusion_matrix <- conf_mat(
+  data = bind_cols(test_data, xgboost_predictions), 
+  truth = Attrition_Flag, 
+  estimate = .pred_class
+)
+
+print(xg_confusion_matrix)
+
+```
+
+```{r}
+cat("Logistic Regression Model\n")
+cat("AUC: ", log_auc, "\n")
+cat("Accuracy: ", log_reg_accuracy, "\n")
+
+cat("\nKNN Model\n")
+cat("AUC: ", 0.8585, "\n")
+cat("Accuracy: ", accuracy_knn, "\n")
+
+
+cat("\nNaive Bayes Model\n")
+cat("AUC: ",  0.8633	, "\n")
+cat("Accuracy: ", 0.8856, "\n")
+
+cat("\nRandom Forest Model\n")
+cat("AUC: ", 0.9834	, "\n")
+cat("Accuracy: ", 0.95205, "\n")
+
+
+```
